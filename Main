@@ -1,0 +1,367 @@
+#!/usr/bin/php
+<?php
+
+//Built for command line only
+//I even added pretty colours!
+
+/****
+/* Copyright © 2015 UnicornDelight <info@unicorndelight.com>
+/* This work is free. It comes without any warranty, to the extent
+/* permitted by applicable law. You can redistribute it and/or modify it under
+/* the terms of the Do What The Fuck You Want To Public License, Version 2,
+/* as published by Sam Hocevar. See http://www.wtfpl.net/ for more details.
+/****/
+
+//WARNING!
+	//THIS ABSOLUTELY VIOLATES YELP'S API TERMS OF USE
+	//Yelp's terms of use: https://www.yelp.com/developers/api_terms
+	//This was built on a theory case and was not used or tested
+	
+	//*****************
+	//
+	//EDUCATIONAL USE ONLY
+	//
+	//*****************
+
+//Yes, PascalCase, deal with it
+//Also, YAY MEMORY LEAKS!
+
+//This was written very quickly as you can see
+//I may clean it up later
+//No idea why I left out the file extension, but I did
+
+//DO NOT STORE FILES IN PUBLIC/OPEN PERMISSIONS PATH
+//KEEP SHIT PRIVATE FOR FUCKS SAKE, PEOPLE!
+
+/**
+ * Sample usage of the program:
+ * ~# php Main --state="WA" --category="food" --keyid="1"
+ *
+ * Also, since it's CLI, feel free to modify the memory limit:
+ * ~# php -d memory_limit=1024M Main --state="NY" --category="food" --keyid="1"
+ */
+ 
+//OAuth Library
+require_once('lib/OAuth.php');
+
+//Database Helper Library
+require_once('lib/medoo.php');
+
+//Taste the rainbow
+require_once('lib/Colors.php');
+$Color = new Colors();
+//Above Colour Awesomeness From:
+//http://www.if-not-true-then-false.com/2010/php-class-for-coloring-php-command-line-cli-scripts-output-php-output-colorizing-using-bash-shell-colors/
+
+//Initialize Database
+$Database = new medoo(
+	[
+		'database_type' => 'mysql',
+		'database_name' => 'Melp',
+		'server' => '',
+		'username' => '',
+		'password' => '',
+		'charset' => 'utf8'
+	]
+);
+
+//OAuth signing for yelp api
+function YelpAuth($APIKeys, $UnsignedLink)
+{
+	//Create API Key Variables
+	foreach($APIKeys as $APIKey) {
+		$ConsumerKey = $APIKey["ConsumerKey"];
+		$ConsumerSecret = $APIKey["ConsumerSecret"];
+		$Token = $APIKey["Token"];
+		$TokenSecret = $APIKey["TokenSecret"];
+	};
+	
+	//OAuth Fun!
+	$TokenObject = new OAuthToken(
+		$Token,
+		$TokenSecret
+	);
+	
+	$ConsumerObject = new OAuthConsumer(
+		$ConsumerKey,
+		$ConsumerSecret
+	);
+	
+	$SignatureMethod = new OAuthSignatureMethod_HMAC_SHA1();
+	$OAuthRequest = OAuthRequest::from_consumer_and_token(
+		$ConsumerObject, 
+		$TokenObject, 
+		'GET', 
+		$UnsignedLink
+	);
+
+	$OAuthRequest->sign_request(
+		$SignatureMethod,
+		$ConsumerObject,
+		$TokenObject
+	);
+	$SignedLink = $OAuthRequest->to_url();
+	
+	//Garbage collection
+	$OAuthRequest = NULL;
+	$ConsumerObject = NULL;
+	$SignatureMethod = NULL;
+	$TokenObject = NULL;
+	
+	//Return the OAuth signed link
+	return $SignedLink;
+};
+
+//Makes a request to the Yelp API and returns the response
+function YelpRequest($KeyID, $Path, $Category, $Database, $Color)
+{
+	//Retrieve the APIKeys from the database
+	$APIKeys = $Database->select(
+		"Keys", [
+			"ConsumerKey",
+			"ConsumerSecret",
+			"Token",
+			"TokenSecret"
+		], [
+			"ID" => $KeyID,
+			"LIMIT" => 1
+		]
+	);
+	
+	//Start the loop for the api results limit
+	for ($Loop = 0; $Loop <= 1000; $Loop+=20)
+	{
+		//Determine the offset
+		if ($Loop === 0) {
+			$Offset = '1';
+		} else {
+			$Offset = $Loop;
+		};
+		
+		//Format the UnsignedLink for OAuth signing
+		$UnsignedLink = "http://api.yelp.com" . $Path . '&offset=' . $Offset;
+		
+		//Reset the offset now that it was used above
+		$Offset = NULL;
+		
+		//Authenticate and sign the link
+		$SignedLink = YelpAuth(
+			$APIKeys,
+			$UnsignedLink
+		);
+		
+		//Grab data with the signed link via curl
+		$Curl = curl_init($SignedLink);
+		curl_setopt($Curl, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($Curl, CURLOPT_HEADER, 0);
+		$Data = curl_exec($Curl);
+		curl_close($Curl);
+		
+		//Now data sorting time
+		$DecodedJSON = json_decode($Data);
+		$Max = count($DecodedJSON->businesses);
+		
+		//Garbage collection
+		$SignedLink = NULL;
+		$Data = NULL;
+		$Curl = NULL;
+		
+		//Count returned business totals with current loop total
+		$BusinessCount = $DecodedJSON->total;
+		echo $Color->getColoredString("Business Total: " . $BusinessCount, "white", "blue") . "\n";
+		echo $Color->getColoredString("Current Record: " . $Loop, "white", "blue") . "\n";
+		if ($BusinessCount < $Loop) {
+			echo $Color->getColoredString("Area Completed....", "green", NULL) . "\n\n";
+			return true;
+		};
+		
+		//Check for errors
+		if ($DecodedJSON->error)
+		{
+			//TODO: Better error detection
+			//TODO: Something actually do something useful
+			switch($DecodedJSON->error->id) {
+				case 'EXCEEDED_REQS':
+					echo $Color->getColoredString("ErrorID: " . $DecodedJSON->error->id, "red", NULL) . "\n";
+					echo $Color->getColoredString("ErrorText: " . $DecodedJSON->error->text, "red", NULL) . "\n";
+					echo $Color->getColoredString("Quitting....", "white", "red") . "\n";
+					exit();
+				case 'INVALID_SIGNATURE':
+					echo $Color->getColoredString("ErrorID: " . $DecodedJSON->error->id, "red", NULL) . "\n";
+					echo $Color->getColoredString("ErrorText: " . $DecodedJSON->error->text, "red", NULL) . "\n";
+					$GoodToGo = false;
+					echo $Color->getColoredString("Skipping....", "light_gray", NULL) . "\n";
+					break;
+				case 'BUSINESS_UNAVAILABLE':
+					echo $Color->getColoredString("ErrorID: " . $DecodedJSON->error->id, "red", NULL) . "\n";
+					echo $Color->getColoredString("ErrorText: " . $DecodedJSON->error->text, "red", NULL) . "\n";
+					$GoodToGo = false;
+					echo $Color->getColoredString("Skipping....", "light_gray", NULL) . "\n";
+					break;
+				default:
+					echo $Color->getColoredString("ErrorID: " . $DecodedJSON->error->id, "red", NULL) . "\n";
+					echo $Color->getColoredString("ErrorText: " . $DecodedJSON->error->text, "red", NULL) . "\n";
+					$GoodToGo = false;
+					echo $Color->getColoredString("Skipping....", "light_gray", NULL) . "\n";
+					break;
+				//TODO: Add more errors and cleanup
+			};
+		};
+
+		//Set the initial loop count
+		$Int = 0;
+		
+		//Loop through the results
+		while ($Int < $Max)
+		{
+			//Insert the parsed JSON data
+			$Database->insert(
+				"Businesses", [
+					"id" => $DecodedJSON->businesses[$Int]->id,
+					"is_claimed" => $DecodedJSON->businesses[$Int]->is_claimed,
+					"rating" => $DecodedJSON->businesses[$Int]->rating,
+					"mobile_url" => $DecodedJSON->businesses[$Int]->mobile_url,
+					"rating_img_url" => $DecodedJSON->businesses[$Int]->rating_img_url,
+					"review_count" => $DecodedJSON->businesses[$Int]->review_count,
+					"name" => $DecodedJSON->businesses[$Int]->name,
+					"rating_img_url_small" => $DecodedJSON->businesses[$Int]->rating_img_url_small,
+					"url" => $DecodedJSON->businesses[$Int]->url,
+					"phone" => $DecodedJSON->businesses[$Int]->phone,
+					"snippet_text" => $DecodedJSON->businesses[$Int]->snippet_text,
+					"image_url" => $DecodedJSON->businesses[$Int]->image_url,
+					"snippet_image_url" => $DecodedJSON->businesses[$Int]->snippet_image_url,
+					"display_phone" => $DecodedJSON->businesses[$Int]->display_phone,
+					"rating_img_url_large" => $DecodedJSON->businesses[$Int]->rating_img_url_large,
+					"is_closed" => $DecodedJSON->businesses[$Int]->is_closed,
+					"postal_code" => $DecodedJSON->businesses[$Int]->location->postal_code,
+					"country_code" => $DecodedJSON->businesses[$Int]->location->country_code,
+					"state_code" => $DecodedJSON->businesses[$Int]->location->state_code,
+					"cross_streets" => $DecodedJSON->businesses[$Int]->location->cross_streets,
+					//There is a better way to detect the following..
+					//..but Doctor Who is on in 20 minutes....
+					"category_a_name" => $DecodedJSON->businesses[$Int]->categories[0][0],
+					"category_a_filter" => $DecodedJSON->businesses[$Int]->categories[0][1],
+					"category_b_name" => $DecodedJSON->businesses[$Int]->categories[1][0],
+					"category_b_filter" => $DecodedJSON->businesses[$Int]->categories[1][1],
+					"category_c_name" => $DecodedJSON->businesses[$Int]->categories[2][0],
+					"category_c_filter" => $DecodedJSON->businesses[$Int]->categories[2][1],
+					"category_d_name" => $DecodedJSON->businesses[$Int]->categories[3][0],
+					"category_d_filter" => $DecodedJSON->businesses[$Int]->categories[3][1],
+					"category_e_name" => $DecodedJSON->businesses[$Int]->categories[4][0],
+					"category_e_filter" => $DecodedJSON->businesses[$Int]->categories[4][1],
+					"category_f_name" => $DecodedJSON->businesses[$Int]->categories[5][0],
+					"category_f_filter" => $DecodedJSON->businesses[$Int]->categories[5][1],
+					"category_g_name" => $DecodedJSON->businesses[$Int]->categories[6][0],
+					"category_g_filter" => $DecodedJSON->businesses[$Int]->categories[6][1],
+					"category_h_name" => $DecodedJSON->businesses[$Int]->categories[7][0],
+					"category_h_filter" => $DecodedJSON->businesses[$Int]->categories[7][1],
+					"address" => $DecodedJSON->businesses[$Int]->location->address[0],
+					"city" => $DecodedJSON->businesses[$Int]->location->city
+				]
+			);
+			
+			//Output the business identifier
+			echo $Color->getColoredString("BusinessID: " . $DecodedJSON->businesses[$Int]->id, "cyan", NULL) . "\n";
+			
+			//Double check for a sneaky fifth category
+			if ($DecodedJSON->businesses[$Int]->categories[8][1]) {
+				echo $Color->getColoredString("9th Fucking Category -> Quitting....", "white", "red") . "\n";
+				exit();
+			};
+			
+			//Add to the loop count
+			$Int++;
+		};
+		
+		//Garbage collection once again
+		$DecodedJSON = NULL;
+		
+		//Loop completed and saved -> Show message
+		echo $Color->getColoredString("Saved To Database", "green", NULL) . "\n\n";
+	};
+	
+	//Garbage collection
+	$APIKeys = NULL;
+	$Color = NULL;
+	
+	return true;
+};
+
+ //Query the Search API
+function YelpSearch($State, $Category, $KeyID, $Database, $Color)
+{
+	//Retrieve the needed zips by state
+	$ZipCodes = $Database->select(
+		"ZipCodes",
+		"ZipCode", [
+			"State" => $State
+		]
+	);
+	
+	//Mix the zip codes up
+	shuffle($ZipCodes);
+	
+	//Loop through each zip
+	foreach ($ZipCodes as $ZipCode)
+	{	
+		//Output the current zip in the loop
+		echo $Color->getColoredString("\t\t\tNow Visiting " . $ZipCode . ".", "white", "green") . "\n\n";
+		
+		//Build the unsigned link
+		$LinkParams = array();
+		$LinkParams['location'] = $ZipCode;
+		$LinkParams['limit'] = 20;
+		$LinkParams['category_filter'] = $Category;
+		$SearchPath = '/v2/search/' . "?" . http_build_query($LinkParams);
+		
+		//Make the request
+		YelpRequest(
+			$KeyID,
+			$SearchPath,
+			$Category,
+			$Database,
+			$Color
+		);
+	};
+	
+	//Loop finished -> Output the message
+	echo $Color->getColoredString("Finished", "white", "green") . "\n\n";
+	
+	//Quit the script
+	exit();
+};
+ 
+ //Retrieve user cli input
+$LongOptions  = array(
+    "state::",
+	"category::",
+	"keyid::",
+);
+
+//Set the passed params as variables
+$Options = getopt("", $LongOptions);
+$State = $Options['state'] ?: '';
+$Category = $Options['category'] ?: '';
+$KeyID = $Options['keyid'] ?: '';
+
+//Turn off php notice errors
+error_reporting(E_ERROR | E_WARNING | E_PARSE);
+
+//Start the search
+YelpSearch(
+	$State,
+	$Category,
+	$KeyID,
+	$Database,
+	$Color
+);
+
+//Possible Future Additions:
+//deals_filter
+//radius_filter
+//sort (0 or 1)
+//term
+//turtles
+
+//SO MUCH ANGER
+?>
